@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 project(HlsServer)
 
-include_directories("utility")
+include_directories("../common")
 
-add_executable(${CMAKE_PROJECT_NAME} main.cc hls_server.cc utility/utility.cc)
+add_executable(${CMAKE_PROJECT_NAME} main.cc hls_server.cc ../common/utility.cc)
 

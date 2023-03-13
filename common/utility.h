@@ -1,5 +1,5 @@
-#ifndef HLS_SERVER_UTILITY_H_
-#define HLS_SERVER_UTILITY_H_
+#ifndef COMMON_UTILITY_H_
+#define COMMON_UTILITY_H_
 
 #include <cstdint>
 #include <string>
@@ -14,4 +14,4 @@ int64_t GetCurrentTimeStamp();
  */
 std::string GetCurrentFormatTime(const char *format = "%Y-%m-%d %H:%M:%S");
 
-#endif  // HLS_SERVER_UTILITY_H_
+#endif  // COMMON_UTILITY_H_

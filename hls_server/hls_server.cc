@@ -3,7 +3,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include "utility/log.h"
+#include "log.h"
 
 const static int32_t kFileBufferSize = 512 * 1024;
 static char file_buf[kFileBufferSize];

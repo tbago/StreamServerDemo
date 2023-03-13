@@ -1,5 +1,5 @@
 #include <iostream>
-#include "utility/utility.h"
+#include "utility.h"
 #include "hls_server.h"
 
 /// http server port
