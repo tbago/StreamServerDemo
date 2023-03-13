@@ -5,6 +5,9 @@
 #include <arpa/inet.h>
 #include "utility/log.h"
 
+const static int32_t kFileBufferSize = 512 * 1024;
+static char file_buf[kFileBufferSize];
+ 
 bool HlsServer::StartServerLoop() {
     int ret = CreateServerSocket();
     if (ret < 0) {
@@ -12,15 +15,21 @@ bool HlsServer::StartServerLoop() {
         return false;
     }
 
-    LOGI("Create server socket success. Listen on port %d", server_port_);
-
+    LOGI("Create server success. Listen on port %d", server_port_);
+    LOGI("Connect server at http://127.0.0.1:%d/index.m3u8", server_port_);
+    
     while (true) {
         int client_socket = AcceptClientSocket();
         if (client_socket < 0) {
             LOGE("accept client failed");
+            return false;
+        }
+
+        if (!ReceiveData(client_socket)) {
+            LOGE("Receive wrong data format");
             break;
         }
-        ReceiveData(client_socket);
+        close(client_socket);
     }
     CloseServer();
     return true;
@@ -73,6 +82,7 @@ bool HlsServer::ReceiveData(int client_socket) {
     char receive_buf[kBuffSize];
     int32_t buf_size = recv(client_socket, receive_buf, kBuffSize, 0);
 
+    // LOGI("receive data:%d,%s", buf_size, receive_buf);
     char uri[100];
     //simple check http header and get uri
     const char *separate = "\n";
@@ -84,20 +94,21 @@ bool HlsServer::ReceiveData(int client_socket) {
                 return false;
             }
         }
+        line = strtok(NULL, separate);
     }
 
     LOGI("uri = %s", uri);
 
     //use hardcode file path
-    std::string file_path = "../data/test" + std::string(uri);
+    std::string file_path = "./data" + std::string(uri);
     FILE *fp = fopen(file_path.c_str(), "rb");
     if (fp == nullptr) {
         LOGE("Open file %s failed", file_path.c_str());
         return false;
     }
 
-    int8_t file_buf[kBuffSize * 2];
-    int file_buf_size = fread(file_buf, 1, sizeof(file_buf), fp);
+    // memset(file_buf, 0, kFileBufferSize);
+    int file_buf_size = fread(file_buf, 1, kFileBufferSize, fp);
     fclose(fp);
 
     const int32_t kHttpHeaderLength = 2000;
@@ -128,7 +139,5 @@ bool HlsServer::ReceiveData(int client_socket) {
     send(client_socket, http_header, strlen(http_header), 0);
     send(client_socket, file_buf, file_buf_size, 0);
 
-    sleep(10);
-
-    return 0;
+    return true;
 }
