@@ -38,7 +38,7 @@ bool HlsServer::StartServerLoop() {
 int HlsServer::CreateServerSocket() {
     server_socket_ = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket_ < 0) {
-        LOGE("create server socket failed");
+        LOGE("Create server socket failed");
         return -1;
     }
     struct sockaddr_in addr;
