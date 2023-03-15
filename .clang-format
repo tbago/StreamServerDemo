@@ -31,4 +31,4 @@ PointerAlignment: Right
 UseTab: Never
 
 # 每行字符的限制，0表示没有限制
-ColumnLimit: 120
+ColumnLimit: 0

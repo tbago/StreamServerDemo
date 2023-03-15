@@ -289,7 +289,7 @@ void RtspServer::SendFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, in
         rtp_packet->header.seq++;
     } else {
         int pkg_count = ceil(frame_size * 1.0 / RTP_MAX_PKT_SIZE);
-        int position = 1;   //skip nalu_type
+        int position = 1;  // skip nalu_type
         int size = RTP_MAX_PKT_SIZE;
         int remain_frame_size = frame_size;
         rtp_packet->payload[0] = (nalu_type & 0x60) | 0x1C;
@@ -298,8 +298,7 @@ void RtspServer::SendFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, in
 
             if (i == 0) {  // start code
                 rtp_packet->payload[1] |= 0x80;
-            }
-            else if (i == pkg_count - 1) {  // end code
+            } else if (i == pkg_count - 1) {  // end code
                 rtp_packet->payload[1] |= 0x40;
             }
 
@@ -314,8 +313,8 @@ void RtspServer::SendFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, in
         }
         assert(remain_frame_size == 0);
     }
-    if ((nalu_type & 0x1F) != 0x07 && (nalu_type &0x1F) != 0x08) {
-        rtp_packet->header.timestamp += kRtmpVideoTimeBase/ kFrameRate;  // hard code need change
+    if ((nalu_type & 0x1F) != 0x07 && (nalu_type & 0x1F) != 0x08) {
+        rtp_packet->header.timestamp += kRtmpVideoTimeBase / kFrameRate;      
     }
 }
 
