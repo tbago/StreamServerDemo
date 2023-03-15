@@ -21,6 +21,8 @@ static bool BindSocketAddress(int socket_fd, const char *ip_address, int port);
 static bool SendDataByUdp(int socket, const char *ip_address, const int port, const char *data, const int data_size);
 
 static const char *kH264TestFile = "./data/test.h264";
+static const float kFrameRate = 29.97;
+static const int kRtmpVideoTimeBase = 90000;
 
 RtspServer::RtspServer(int server_port) {
     server_port_ = server_port;
@@ -203,9 +205,9 @@ void RtspServer::BuildDescribeMessage(char *buf, int CSeq, char *url) {
             "t=0 0\r\n"
             "a=control:*\r\n"
             "m=video 0 RTP/AVP 96\r\n"
-            "a=rtpmap:96 H264/90000\r\n"
+            "a=rtpmap:96 H264/%d\r\n"
             "a=control:track0\r\n",
-            time(NULL), local_ip);
+            time(NULL), local_ip, kRtmpVideoTimeBase);
 
     sprintf(buf,
             "RTSP/1.0 200 OK\r\nCSeq: %d\r\n"
@@ -259,7 +261,7 @@ void RtspServer::LoopReadAndSendFrame() {
         }
 
         SendFrameByUdp(rtp_packet, frame_buf, frame_size);
-        usleep(40 * 1000);
+        usleep(1000 * 1000 / kFrameRate);
     }
     // release resources
     free(frame_buf);
@@ -290,7 +292,7 @@ void RtspServer::SendFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, in
         int position = 1;   //skip nalu_type
         int size = RTP_MAX_PKT_SIZE;
         int remain_frame_size = frame_size;
-        rtp_packet->payload[0] = (nalu_type & 0x60) | 28;
+        rtp_packet->payload[0] = (nalu_type & 0x60) | 0x1C;
         for (int i = 0; i < pkg_count; i++) {
             rtp_packet->payload[1] = (nalu_type & 0x1F);
 
@@ -313,7 +315,7 @@ void RtspServer::SendFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, in
         assert(remain_frame_size == 0);
     }
     if ((nalu_type & 0x1F) != 0x07 && (nalu_type &0x1F) != 0x08) {
-        rtp_packet->header.timestamp += 90000 / 25;  // hard code need change
+        rtp_packet->header.timestamp += kRtmpVideoTimeBase/ kFrameRate;  // hard code need change
     }
 }
 
