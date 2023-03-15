@@ -1,9 +1,26 @@
 #include "rtsp_server.h"
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
+
 #include <arpa/inet.h>
+#include <cassert>
+#include <cmath>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include "log.h"
+#include "rtp.h"
+
+static inline bool H264FourByteStartCode(const char *buf);
+static inline bool H264ThreeByteStartCode(const char *buf);
+static const char *H264FindStartCode(const char *buf, int buf_length);
+static int H264GetFrameFromFile(FILE *fp, char *frame_buf, const int frame_buf_size);
+
+static int CreateUdpSocket();
+static bool BindSocketAddress(int socket_fd, const char *ip_address, int port);
+
+static bool SendDataByUdp(int socket, const char *ip_address, const int port, const char *data, const int data_size);
+
+static const char *kH264TestFile = "./data/test.h264";
 
 RtspServer::RtspServer(int server_port) {
     server_port_ = server_port;
@@ -11,9 +28,7 @@ RtspServer::RtspServer(int server_port) {
     server_rtcp_port_ = 55533;
 }
 
-RtspServer::~RtspServer() {
-    CloseServer();
-}
+RtspServer::~RtspServer() { CloseServer(); }
 
 bool RtspServer::StartServerLoop() {
     if (!CreateServerSocket()) {
@@ -31,7 +46,7 @@ bool RtspServer::StartServerLoop() {
 
         DoRtspCommunication(client_socket);
     }
- 
+
     return true;
 }
 
@@ -60,7 +75,7 @@ bool RtspServer::CreateServerSocket() {
         LOGE("Listen server failed");
         return false;
     }
-   return true;
+    return true;
 }
 
 int RtspServer::AcceptClientSocket() {
@@ -72,9 +87,10 @@ int RtspServer::AcceptClientSocket() {
         LOGE("Accept client receive failed");
         return -1;
     }
-    
+
     const char *ip_address = inet_ntoa(addr.sin_addr);
     LOGI("Accept connection from %s:%d", ip_address, ntohs(addr.sin_port));
+    client_ip_ = ip_address;
     return client_socket;
 }
 
@@ -102,25 +118,20 @@ void RtspServer::DoRtspCommunication(int client_socket) {
         const char *separate = "\n";
         char *line = strtok(receive_buf, separate);
         while (line != nullptr) {
-            if (strstr(line, "OPTIONS") ||
-                strstr(line, "DESCRIBE") ||
-                strstr(line, "SETUP") ||
-                strstr(line, "PLAY"))
-            {
+            if (strstr(line, "OPTIONS") || strstr(line, "DESCRIBE") || strstr(line, "SETUP") || strstr(line, "PLAY")) {
                 int ret = sscanf(line, "%s %s %s\r\n", method, url, version);
                 if (ret != 3) {
                     LOGE("Parse method failed, %s", line);
                 }
-            }
-            else if (strstr(line, "CSeq") != nullptr) {
+            } else if (strstr(line, "CSeq") != nullptr) {
                 int ret = sscanf(line, "CSeq:%d\r\n", &CSeq);
                 if (ret != 1) {
                     LOGE("Parser CSeq failed,%s", line);
                     break;
                 }
-            }
-            else if (strstr(line, "Transport") != nullptr) {
-                int ret = sscanf(line, "Transport: RTP/AVP/UDP;unicast;client_port=%d-%d\r\n", &client_rtp_port, &client_rtcp_port);
+            } else if (strstr(line, "Transport") != nullptr) {
+                int ret = sscanf(line, "Transport: RTP/AVP/UDP;unicast;client_port=%d-%d\r\n", &client_rtp_port_,
+                                 &client_rtcp_port_);
                 if (ret != 2) {
                     LOGE("Prase transport failed, %s", line);
                     break;
@@ -130,21 +141,28 @@ void RtspServer::DoRtspCommunication(int client_socket) {
         }
 
         const int kSendBufSize = 2000;
-        char send_buf[2000];
+        char send_buf[kSendBufSize];
         LOGI("method:%s", method);
         if (strcmp(method, "OPTIONS") == 0) {
             BuildOptionsMessage(send_buf, CSeq);
-        }
-        else if (strcmp(method, "DESCRIBE") == 0) {
+        } else if (strcmp(method, "DESCRIBE") == 0) {
             BuildDescribeMessage(send_buf, CSeq, url);
-        }
-        else if (strcmp(method, "SETUP") == 0) {
+        } else if (strcmp(method, "SETUP") == 0) {
             BuildSetupMessage(send_buf, CSeq, client_rtp_port, client_rtcp_port);
-        }
-        else if (strcmp(method, "PLAY") == 0) {
+
+            // create rtp socket
+            if (server_rtp_socket_ = CreateUdpSocket(); server_rtp_socket_ < 0) {
+                LOGE("Create rtp socket failed");
+                break;
+            }
+
+            if (!BindSocketAddress(server_rtp_socket_, "0.0.0.0", server_rtp_port_)) {
+                LOGE("Bind rtp socket failed");
+                break;
+            }
+        } else if (strcmp(method, "PLAY") == 0) {
             BuildPlayMessage(send_buf, CSeq);
-        }
-        else {
+        } else {
             LOGI("Unsupport method :%s", method);
             break;
         }
@@ -154,24 +172,23 @@ void RtspServer::DoRtspCommunication(int client_socket) {
         if (strcmp(method, "PLAY") == 0) {
             LOGI("Start play rtsp stream");
 
-            while (true) {
-                usleep(1000 * 10);
-            }
+            LoopReadAndSendFrame();
         }
     }  // while(true)
+
     close(client_socket);
+    close(server_rtp_socket_);
 }
 
-void RtspServer::CloseServer() {
-    close(server_socket_);
-}
+void RtspServer::CloseServer() { close(server_socket_); }
 
 void RtspServer::BuildOptionsMessage(char *buf, int CSeq) {
-    sprintf(buf, "RTSP/1.0 200 OK\r\n"
-        "CSeq: %d\r\n"
-        "Public: OPTIONS, DESCRIBE, SETUP, PLAY\r\n"
-        "\r\n",
-        CSeq);
+    sprintf(buf,
+            "RTSP/1.0 200 OK\r\n"
+            "CSeq: %d\r\n"
+            "Public: OPTIONS, DESCRIBE, SETUP, PLAY\r\n"
+            "\r\n",
+            CSeq);
 }
 
 void RtspServer::BuildDescribeMessage(char *buf, int CSeq, char *url) {
@@ -180,43 +197,233 @@ void RtspServer::BuildDescribeMessage(char *buf, int CSeq, char *url) {
 
     sscanf(url, "rtsp://%s[^:]:", local_ip);
 
-    sprintf(sdp_buf, "v=0\r\n"
-        "o=- 9%ld 1 IN IP4 %s\r\n"
-        "t=0 0\r\n"
-        "a=control:*\r\n"
-        "m=video 0 RTP/AVP 96\r\n"
-        "a=rtpmap:96 H264/90000\r\n"
-        "a=control:track0\r\n",
-        time(NULL), local_ip);
+    sprintf(sdp_buf,
+            "v=0\r\n"
+            "o=- 9%ld 1 IN IP4 %s\r\n"
+            "t=0 0\r\n"
+            "a=control:*\r\n"
+            "m=video 0 RTP/AVP 96\r\n"
+            "a=rtpmap:96 H264/90000\r\n"
+            "a=control:track0\r\n",
+            time(NULL), local_ip);
 
-    sprintf(buf, "RTSP/1.0 200 OK\r\nCSeq: %d\r\n"
-        "Content-Base: %s\r\n"
-        "Content-type: application/sdp\r\n"
-        "Content-length: %zu\r\n\r\n"
-        "%s",
-        CSeq,
-        url,
-        strlen(sdp_buf),
-        sdp_buf);
+    sprintf(buf,
+            "RTSP/1.0 200 OK\r\nCSeq: %d\r\n"
+            "Content-Base: %s\r\n"
+            "Content-type: application/sdp\r\n"
+            "Content-length: %zu\r\n\r\n"
+            "%s",
+            CSeq, url, strlen(sdp_buf), sdp_buf);
 }
 
 void RtspServer::BuildSetupMessage(char *buf, int CSeq, int client_rtp_port, int client_rtcp_port) {
-    sprintf(buf, "RTSP/1.0 200 OK\r\n"
-        "CSeq: %d\r\n"
-        "Transport: RTP/AVP;unicast;client_port=%d-%d;server_port=%d-%d\r\n"
-        "Session: 66334873\r\n"
-        "\r\n",
-        CSeq,
-        client_rtp_port,
-        client_rtcp_port,
-        server_rtp_port_,
-        server_rtcp_port_);
+    sprintf(buf,
+            "RTSP/1.0 200 OK\r\n"
+            "CSeq: %d\r\n"
+            "Transport: RTP/AVP;unicast;client_port=%d-%d;server_port=%d-%d\r\n"
+            "Session: 66334873\r\n"
+            "\r\n",
+            CSeq, client_rtp_port, client_rtcp_port, server_rtp_port_, server_rtcp_port_);
 }
 
 void RtspServer::BuildPlayMessage(char *buf, int CSeq) {
-    sprintf(buf, "RTSP/1.0 200 OK\r\n"
-        "CSeq: %d\r\n"
-        "Range: npt=0.000-\r\n"
-        "Session: 66334873; timeout=10\r\n\r\n",
-        CSeq);
+    sprintf(buf,
+            "RTSP/1.0 200 OK\r\n"
+            "CSeq: %d\r\n"
+            "Range: npt=0.000-\r\n"
+            "Session: 66334873; timeout=10\r\n\r\n",
+            CSeq);
+}
+
+void RtspServer::LoopReadAndSendFrame() {
+    FILE *fp = fopen(kH264TestFile, "rb");
+    if (fp == nullptr) {
+        LOGE("Cannot open h264 test file");
+        return;
+    }
+
+    const int frame_buf_size = 500000;  // just for test
+    char *frame_buf = (char *)malloc(frame_buf_size);
+
+    RtpPacket *rtp_packet = (RtpPacket *)malloc(frame_buf_size);
+    memset(&rtp_packet->header, 0, sizeof(RtpHeader));
+    rtp_packet->header.version = RTP_VERSION;
+    rtp_packet->header.payload_type = RTP_PAYLOAD_TYPE_H264;
+    rtp_packet->header.ssrc = 0x88923423;
+
+    while (true) {
+        int frame_size = H264GetFrameFromFile(fp, frame_buf, frame_buf_size);
+        if (frame_size < 0) {
+            LOGI("Read end of H264 file");
+            break;
+        }
+
+        SendFrameByUdp(rtp_packet, frame_buf, frame_size);
+        usleep(40 * 1000);
+    }
+    // release resources
+    free(frame_buf);
+    free(rtp_packet);
+    fclose(fp);
+}
+
+void RtspServer::SendFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, int frame_size) {
+    int start_code_length = 4;
+    if (H264ThreeByteStartCode(frame_buf)) {
+        start_code_length = 3;
+    }
+
+    uint8_t nalu_type = *(frame_buf + start_code_length);
+    if (frame_size <= RTP_MAX_PKT_SIZE) {  // 单nalu模式
+        //*   0 1 2 3 4 5 6 7 8 9
+        //*  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        //*  |F|NRI|  Type   | a single NAL unit ... |
+        //*  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        frame_buf = frame_buf + start_code_length;
+        frame_size -= start_code_length;
+        memcpy(rtp_packet->payload, frame_buf, frame_size);
+        SendRtpPacket(rtp_packet, frame_size + RTP_HEADER_SIZE);
+        rtp_packet->header.seq++;
+    } else {
+        int pkg_count = ceil(frame_size * 1.0 / RTP_MAX_PKT_SIZE);
+        int position = 0;
+        int size = RTP_MAX_PKT_SIZE;
+        int remain_frame_size = frame_size;
+        for (int i = 0; i < pkg_count; i++) {
+            rtp_packet->payload[0] = (nalu_type & 0x60) | 28;
+            rtp_packet->payload[1] = (nalu_type & 0x1F);
+
+            if (i == 0) {  // start code
+                rtp_packet->payload[1] |= 0x80;
+            } else if (i == pkg_count - 1) {  // end code
+                rtp_packet->payload[1] |= 0x40;
+            }
+
+            memcpy(rtp_packet->payload + 2, frame_buf + position, size);
+            SendRtpPacket(rtp_packet, size + 2 + RTP_HEADER_SIZE);
+
+            position += size;
+            size = remain_frame_size >= RTP_MAX_PKT_SIZE ? RTP_MAX_PKT_SIZE : remain_frame_size;
+            remain_frame_size -= size;
+
+            rtp_packet->header.seq++;
+        }
+        assert(remain_frame_size == 0);
+    }
+    if ((nalu_type & 0x1F) != 0x07 && (nalu_type &0x1F) != 0x08) {
+        rtp_packet->header.timestamp += 90000 / 25;  // hard code need change
+    }
+}
+
+bool RtspServer::SendRtpPacket(RtpPacket *rtp_packet, int rtp_packet_size) {
+    rtp_packet->header.seq = htons(rtp_packet->header.seq);
+    rtp_packet->header.timestamp = htonl(rtp_packet->header.timestamp);
+    rtp_packet->header.ssrc = htonl(rtp_packet->header.ssrc);
+
+    bool ret = SendDataByUdp(server_rtp_socket_, client_ip_.c_str(), client_rtp_port_, (const char *)rtp_packet,
+                             rtp_packet_size);
+    rtp_packet->header.seq = ntohs(rtp_packet->header.seq);
+    rtp_packet->header.timestamp = ntohl(rtp_packet->header.timestamp);
+    rtp_packet->header.ssrc = ntohl(rtp_packet->header.ssrc);
+    return ret;
+}
+
+//////////////// H264 Help function ////////////////////////
+static inline bool H264FourByteStartCode(const char *buf) {
+    if (buf[0] == 0x00 && buf[1] == 0x00 && buf[2] == 0x00 && buf[3] == 0x01) {
+        return true;
+    }
+    return false;
+}
+
+static inline bool H264ThreeByteStartCode(const char *buf) {
+    if (buf[0] == 0x00 && buf[1] == 0x00 && buf[2] == 0x01) {
+        return true;
+    }
+    return false;
+}
+
+static const char *H264FindStartCode(const char *buf, int buf_length) {
+    if (buf_length < 3) {
+        return nullptr;
+    }
+
+    for (int i = 0; i < buf_length - 4; i++) {
+        if (H264FourByteStartCode(buf + i) || H264ThreeByteStartCode(buf + i)) {
+            return buf + i;
+        }
+    }
+
+    /// check last three byte
+    const char *last_three_byte = buf + buf_length - 3;
+    if (H264ThreeByteStartCode(last_three_byte)) {
+        return last_three_byte;
+    }
+
+    return nullptr;
+}
+
+// get h264 frame from .h264 file
+static int H264GetFrameFromFile(FILE *fp, char *frame_buf, const int frame_buf_size) {
+    int size = fread(frame_buf, 1, frame_buf_size, fp);
+    if (size <= 4) {
+        return -1;
+    }
+
+    if (!H264ThreeByteStartCode(frame_buf) && !H264FourByteStartCode(frame_buf)) {
+        return -1;
+    }
+
+    // skip first 3 byte
+    const char *next_frame_buf = H264FindStartCode(frame_buf + 3, frame_buf_size - 3);
+    if (next_frame_buf == nullptr) {
+        ///< TODO(tbago) need change
+        return -1;
+    } else {  // seek to next frame pos
+        int seek_pos = next_frame_buf - frame_buf - size;
+        fseek(fp, seek_pos, SEEK_CUR);
+    }
+
+    return size;
+}
+
+//////////////// Help function
+static int CreateUdpSocket() {
+    int socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (socket_fd == -1) {
+        LOGE("Create udp socket failed");
+        return -1;
+    }
+
+    int on = 1;
+    setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    return socket_fd;
+}
+
+static bool BindSocketAddress(int socket_fd, const char *ip_address, int port) {
+    struct sockaddr_in addr;
+
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = inet_addr(ip_address);
+
+    if (bind(socket_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        return false;
+    }
+
+    return true;
+}
+
+static bool SendDataByUdp(int socket, const char *ip_address, const int port, const char *data, const int data_size) {
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = inet_addr(ip_address);
+
+    int ret = sendto(socket, data, data_size, 0, (struct sockaddr *)&addr, sizeof(addr));
+    if (ret == -1) {
+        LOGE("Send udp packet failed with errcode : %d", errno);
+        return false;
+    }
+    return true;
 }

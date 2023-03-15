@@ -29,3 +29,6 @@ PointerAlignment: Right
 
 # 使用tab字符: Never, ForIndentation, ForContinuationAndIndentation, Always
 UseTab: Never
+
+# 每行字符的限制，0表示没有限制
+ColumnLimit: 120
