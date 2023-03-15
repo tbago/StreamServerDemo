@@ -8,4 +8,4 @@ project(RtspServer)
 
 include_directories("../common/")
 
-add_executable(${CMAKE_PROJECT_NAME} main.cc rtsp_server.cc ../common/utility.cc)
+add_executable(${CMAKE_PROJECT_NAME} main.cc rtsp_server.cc adts_header.cc ../common/utility.cc)

@@ -9,6 +9,7 @@
 
 #include "log.h"
 #include "rtp.h"
+#include "adts_header.h"
 
 static inline bool H264FourByteStartCode(const char *buf);
 static inline bool H264ThreeByteStartCode(const char *buf);
@@ -23,6 +24,10 @@ static bool SendDataByUdp(int socket, const char *ip_address, const int port, co
 static const char *kH264TestFile = "./data/test.h264";
 static const float kFrameRate = 29.97;
 static const int kRtmpVideoTimeBase = 90000;
+
+static const char *kAACTestFile = "./data/test.aac";
+static const int kAudioSampleRate = 44100;
+static const int kAudioChannel = 2;
 
 RtspServer::RtspServer(int server_port) {
     server_port_ = server_port;
@@ -174,7 +179,8 @@ void RtspServer::DoRtspCommunication(int client_socket) {
         if (strcmp(method, "PLAY") == 0) {
             LOGI("Start play rtsp stream");
 
-            LoopReadAndSendFrame();
+            // LoopReadAndSendVideoFrame();
+            LoopReadAndSendAudioFrame();
         }
     }  // while(true)
 
@@ -198,16 +204,26 @@ void RtspServer::BuildDescribeMessage(char *buf, int CSeq, char *url) {
     char local_ip[100];
 
     sscanf(url, "rtsp://%s[^:]:", local_ip);
-
-    sprintf(sdp_buf,
-            "v=0\r\n"
-            "o=- 9%ld 1 IN IP4 %s\r\n"
-            "t=0 0\r\n"
-            "a=control:*\r\n"
-            "m=video 0 RTP/AVP 96\r\n"
-            "a=rtpmap:96 H264/%d\r\n"
-            "a=control:track0\r\n",
-            time(NULL), local_ip, kRtmpVideoTimeBase);
+    //
+    // sprintf(sdp_buf,
+    //         "v=0\r\n"
+    //         "o=- 9%ld 1 IN IP4 %s\r\n"
+    //         "t=0 0\r\n"
+    //         "a=control:*\r\n"
+    //         "m=video 0 RTP/AVP 96\r\n"
+    //         "a=rtpmap:96 H264/%d\r\n"
+    //         "a=control:track0\r\n",
+    //         time(NULL), local_ip, kRtmpVideoTimeBase);
+    //
+     sprintf(sdp_buf, "v=0\r\n"
+        "o=- 9%ld 1 IN IP4 %s\r\n"
+        "t=0 0\r\n"
+        "a=control:*\r\n"
+        "m=audio 0 RTP/AVP 97\r\n"
+        "a=rtpmap:97 mpeg4-generic/%d/%d\r\n"
+        "a=fmtp:97 profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1210;\r\n"
+        "a=control:track0\r\n",
+        time(NULL), local_ip, kAudioSampleRate, kAudioChannel);
 
     sprintf(buf,
             "RTSP/1.0 200 OK\r\nCSeq: %d\r\n"
@@ -237,7 +253,7 @@ void RtspServer::BuildPlayMessage(char *buf, int CSeq) {
             CSeq);
 }
 
-void RtspServer::LoopReadAndSendFrame() {
+void RtspServer::LoopReadAndSendVideoFrame() {
     FILE *fp = fopen(kH264TestFile, "rb");
     if (fp == nullptr) {
         LOGE("Cannot open h264 test file");
@@ -260,7 +276,7 @@ void RtspServer::LoopReadAndSendFrame() {
             break;
         }
 
-        SendFrameByUdp(rtp_packet, frame_buf, frame_size);
+        SendH264FrameByUdp(rtp_packet, frame_buf, frame_size);
         usleep(1000 * 1000 / kFrameRate);
     }
     // release resources
@@ -269,7 +285,50 @@ void RtspServer::LoopReadAndSendFrame() {
     fclose(fp);
 }
 
-void RtspServer::SendFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, int frame_size) {
+void RtspServer::LoopReadAndSendAudioFrame() {
+    FILE *fp = fopen(kAACTestFile, "rb");
+    if (fp == nullptr) {
+        LOGE("Cannot open aac test file");
+        return;
+    }
+
+    AdtsHeader adts_header;
+    static const int kMemorySize = 5000;
+    char *frame_buf = (char *)malloc(kMemorySize);
+    RtpPacket *rtp_packet = (RtpPacket *)malloc(kMemorySize);
+    memset(&rtp_packet->header, 0, sizeof(RtpHeader));
+    rtp_packet->header.version = RTP_VERSION;
+    rtp_packet->header.payload_type = RTP_PAYLOAD_TYPE_AAC;
+    rtp_packet->header.ssrc = 0x32411;
+
+    const int kAdtsHeaderSize = 7;
+    while (true) {
+        int ret = fread(frame_buf, 1, kAdtsHeaderSize, fp);
+        if (ret <= 0) {
+            LOGI("Read end of file");
+            break;
+        }
+
+        if (!ParseAdtsHeader((uint8_t *)frame_buf, ret, &adts_header)) {
+            LOGI("Parse adts header failed");
+            break;
+        }
+        ret = fread(frame_buf, 1, adts_header.aac_frame_length - kAdtsHeaderSize, fp);
+        if (ret <= 0) {
+            LOGE("Read end of file without enough data");
+            break;
+        }
+
+        SendAACFrameByUdp(rtp_packet, frame_buf, ret);
+
+        usleep(2000);
+    }
+    free(frame_buf);
+    free(rtp_packet);
+    fclose(fp);
+}
+
+void RtspServer::SendH264FrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, int frame_size) {
     int start_code_length = 4;
     if (H264ThreeByteStartCode(frame_buf)) {
         start_code_length = 3;
@@ -316,6 +375,24 @@ void RtspServer::SendFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, in
     if ((nalu_type & 0x1F) != 0x07 && (nalu_type & 0x1F) != 0x08) {
         rtp_packet->header.timestamp += kRtmpVideoTimeBase / kFrameRate;      
     }
+}
+
+void RtspServer::SendAACFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, const int frame_buf_size) {
+    //https://blog.csdn.net/yangguoyu8023/article/details/106517251/
+    rtp_packet->payload[0] = 0x00;
+    rtp_packet->payload[1] = 0x10;
+    rtp_packet->payload[2] = (frame_buf_size & 0x1FE0) >> 5;  //高8位
+    rtp_packet->payload[3] = (frame_buf_size & 0x1f) << 3; // 低5位
+
+    memcpy(rtp_packet->payload + 4, frame_buf, frame_buf_size);
+
+    if (!SendRtpPacket(rtp_packet, frame_buf_size + 4 + RTP_HEADER_SIZE)) {
+        LOGE("Send rtp packet failed");
+    }
+
+    rtp_packet->header.seq++;
+
+    rtp_packet->header.timestamp = 1025;
 }
 
 bool RtspServer::SendRtpPacket(RtpPacket *rtp_packet, int rtp_packet_size) {

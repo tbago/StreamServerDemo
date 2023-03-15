@@ -24,8 +24,10 @@ private:
     void BuildPlayMessage(char *buf, int CSeq);
 
 private:
-    void LoopReadAndSendFrame();
-    void SendFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, const int frame_size);
+    void LoopReadAndSendVideoFrame();
+    void LoopReadAndSendAudioFrame();
+    void SendH264FrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, const int frame_size);
+    void SendAACFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, const int frame_size);
     bool SendRtpPacket(RtpPacket *rtp_packet, int rtp_packet_length);
 
 private:

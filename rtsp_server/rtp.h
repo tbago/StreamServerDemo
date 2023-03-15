@@ -34,7 +34,7 @@ struct RtpHeader {
     uint8_t version : 2;    // RTP协议的版本号，占2位，当前协议版本号为2。
 
     /* byte 1 */
-    uint8_t payloadType : 7;  // 有效载荷类型，占7位，用于说明RTP报文中有效载荷的类型，如GSM音频、JPEM图像等。
+    uint8_t payload_type : 7;  // 有效载荷类型，占7位，用于说明RTP报文中有效载荷的类型，如GSM音频、JPEM图像等。
     uint8_t marker : 1;       // 标记，占1位，不同的有效载荷有不同的含义，对于视频，标记一帧的结束；对于音频，标记会话的开始。
 
     /* bytes 2,3 */
