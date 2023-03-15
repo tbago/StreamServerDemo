@@ -273,39 +273,41 @@ void RtspServer::SendFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, in
         start_code_length = 3;
     }
 
-    uint8_t nalu_type = *(frame_buf + start_code_length);
+    frame_buf = frame_buf + start_code_length;
+    frame_size -= start_code_length;
+
+    uint8_t nalu_type = *(frame_buf);
     if (frame_size <= RTP_MAX_PKT_SIZE) {  // 单nalu模式
         //*   0 1 2 3 4 5 6 7 8 9
         //*  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
         //*  |F|NRI|  Type   | a single NAL unit ... |
         //*  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-        frame_buf = frame_buf + start_code_length;
-        frame_size -= start_code_length;
         memcpy(rtp_packet->payload, frame_buf, frame_size);
         SendRtpPacket(rtp_packet, frame_size + RTP_HEADER_SIZE);
         rtp_packet->header.seq++;
     } else {
         int pkg_count = ceil(frame_size * 1.0 / RTP_MAX_PKT_SIZE);
-        int position = 0;
+        int position = 1;   //skip nalu_type
         int size = RTP_MAX_PKT_SIZE;
         int remain_frame_size = frame_size;
+        rtp_packet->payload[0] = (nalu_type & 0x60) | 28;
         for (int i = 0; i < pkg_count; i++) {
-            rtp_packet->payload[0] = (nalu_type & 0x60) | 28;
             rtp_packet->payload[1] = (nalu_type & 0x1F);
 
             if (i == 0) {  // start code
                 rtp_packet->payload[1] |= 0x80;
-            } else if (i == pkg_count - 1) {  // end code
+            }
+            else if (i == pkg_count - 1) {  // end code
                 rtp_packet->payload[1] |= 0x40;
             }
+
+            size = (remain_frame_size >= RTP_MAX_PKT_SIZE ? RTP_MAX_PKT_SIZE : remain_frame_size);
 
             memcpy(rtp_packet->payload + 2, frame_buf + position, size);
             SendRtpPacket(rtp_packet, size + 2 + RTP_HEADER_SIZE);
 
             position += size;
-            size = remain_frame_size >= RTP_MAX_PKT_SIZE ? RTP_MAX_PKT_SIZE : remain_frame_size;
             remain_frame_size -= size;
-
             rtp_packet->header.seq++;
         }
         assert(remain_frame_size == 0);
@@ -365,8 +367,8 @@ static const char *H264FindStartCode(const char *buf, int buf_length) {
 
 // get h264 frame from .h264 file
 static int H264GetFrameFromFile(FILE *fp, char *frame_buf, const int frame_buf_size) {
-    int size = fread(frame_buf, 1, frame_buf_size, fp);
-    if (size <= 4) {
+    int read_size = fread(frame_buf, 1, frame_buf_size, fp);
+    if (read_size <= 4) {
         return -1;
     }
 
@@ -375,16 +377,17 @@ static int H264GetFrameFromFile(FILE *fp, char *frame_buf, const int frame_buf_s
     }
 
     // skip first 3 byte
-    const char *next_frame_buf = H264FindStartCode(frame_buf + 3, frame_buf_size - 3);
+    const char *next_frame_buf = H264FindStartCode(frame_buf + 3, read_size - 3);
     if (next_frame_buf == nullptr) {
         ///< TODO(tbago) need change
         return -1;
     } else {  // seek to next frame pos
-        int seek_pos = next_frame_buf - frame_buf - size;
+        int seek_pos = next_frame_buf - frame_buf - read_size;
         fseek(fp, seek_pos, SEEK_CUR);
+        read_size = next_frame_buf - frame_buf;
     }
 
-    return size;
+    return read_size;
 }
 
 //////////////// Help function
