@@ -3,13 +3,15 @@
 #include <arpa/inet.h>
 #include <cassert>
 #include <cmath>
+#include <mutex>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 
+#include "adts_header.h"
 #include "log.h"
 #include "rtp.h"
-#include "adts_header.h"
 
 static inline bool H264FourByteStartCode(const char *buf);
 static inline bool H264ThreeByteStartCode(const char *buf);
@@ -29,6 +31,8 @@ static const char *kAACTestFile = "./data/test.aac";
 static const int kAudioSampleRate = 44100;
 static const int kAudioChannel = 2;
 
+static std::mutex send_mutex;
+
 RtspServer::RtspServer(int server_port) {
     server_port_ = server_port;
     server_rtp_port_ = 55532;
@@ -44,6 +48,8 @@ bool RtspServer::StartServerLoop() {
 
     LOGI("Create server socket success. Listen on :%d", server_port_);
     LOGI("Connect address is rtsp://127.0.0.1:%d", server_port_);
+
+    tcp_mode_ = true;
 
     while (true) {
         int client_socket = AcceptClientSocket();
@@ -110,6 +116,8 @@ void RtspServer::DoRtspCommunication(int client_socket) {
     int client_rtp_port = 0;
     int client_rtcp_port = 0;
 
+    client_rtsp_socket_ = client_socket;
+
     const int kReceiveBufSize = 2000;
     char receive_buf[kReceiveBufSize];
     while (true) {
@@ -137,11 +145,18 @@ void RtspServer::DoRtspCommunication(int client_socket) {
                     break;
                 }
             } else if (strstr(line, "Transport") != nullptr) {
-                int ret = sscanf(line, "Transport: RTP/AVP/UDP;unicast;client_port=%d-%d\r\n", &client_rtp_port_,
-                                 &client_rtcp_port_);
-                if (ret != 2) {
-                    LOGE("Prase transport failed, %s", line);
-                    break;
+                if (tcp_mode_) {
+                    if (sscanf(line, "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n") != 0) {
+                        LOGE("Parse transport failed, %s", line);
+                        break;
+                    }
+                } else {
+                    int ret = sscanf(line, "Transport: RTP/AVP/UDP;unicast;client_port=%d-%d\r\n", &client_rtp_port_,
+                                     &client_rtcp_port_);
+                    if (ret != 2) {
+                        LOGE("Prase transport failed, %s", line);
+                        break;
+                    }
                 }
             }
             line = strtok(NULL, separate);
@@ -157,15 +172,17 @@ void RtspServer::DoRtspCommunication(int client_socket) {
         } else if (strcmp(method, "SETUP") == 0) {
             BuildSetupMessage(send_buf, CSeq, client_rtp_port, client_rtcp_port);
 
-            // create rtp socket
-            if (server_rtp_socket_ = CreateUdpSocket(); server_rtp_socket_ < 0) {
-                LOGE("Create rtp socket failed");
-                break;
-            }
+            if (!tcp_mode_) {
+                // create rtp socket
+                if (server_rtp_socket_ = CreateUdpSocket(); server_rtp_socket_ < 0) {
+                    LOGE("Create rtp socket failed");
+                    break;
+                }
 
-            if (!BindSocketAddress(server_rtp_socket_, "0.0.0.0", server_rtp_port_)) {
-                LOGE("Bind rtp socket failed");
-                break;
+                if (!BindSocketAddress(server_rtp_socket_, "0.0.0.0", server_rtp_port_)) {
+                    LOGE("Bind rtp socket %d failed", server_rtp_port_);
+                    break;
+                }
             }
         } else if (strcmp(method, "PLAY") == 0) {
             BuildPlayMessage(send_buf, CSeq);
@@ -179,8 +196,12 @@ void RtspServer::DoRtspCommunication(int client_socket) {
         if (strcmp(method, "PLAY") == 0) {
             LOGI("Start play rtsp stream");
 
-            // LoopReadAndSendVideoFrame();
-            LoopReadAndSendAudioFrame();
+            if (!tcp_mode_) {
+                // LoopReadAndSendVideoFrame();
+                LoopReadAndSendAudioFrame();
+            } else {
+                LoopReadAndSendAVFrameOverTcp();
+            }
         }
     }  // while(true)
 
@@ -204,27 +225,45 @@ void RtspServer::BuildDescribeMessage(char *buf, int CSeq, char *url) {
     char local_ip[100];
 
     sscanf(url, "rtsp://%s[^:]:", local_ip);
-    //
-    // sprintf(sdp_buf,
-    //         "v=0\r\n"
-    //         "o=- 9%ld 1 IN IP4 %s\r\n"
-    //         "t=0 0\r\n"
-    //         "a=control:*\r\n"
-    //         "m=video 0 RTP/AVP 96\r\n"
-    //         "a=rtpmap:96 H264/%d\r\n"
-    //         "a=control:track0\r\n",
-    //         time(NULL), local_ip, kRtmpVideoTimeBase);
-    //
-     sprintf(sdp_buf, "v=0\r\n"
-        "o=- 9%ld 1 IN IP4 %s\r\n"
-        "t=0 0\r\n"
-        "a=control:*\r\n"
-        "m=audio 0 RTP/AVP 97\r\n"
-        "a=rtpmap:97 mpeg4-generic/%d/%d\r\n"
-        "a=fmtp:97 profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1210;\r\n"
-        "a=control:track0\r\n",
-        time(NULL), local_ip, kAudioSampleRate, kAudioChannel);
+    if (!tcp_mode_) {
+        // rtsp with video only
+        // sprintf(sdp_buf,
+        //         "v=0\r\n"
+        //         "o=- 9%ld 1 IN IP4 %s\r\n"
+        //         "t=0 0\r\n"
+        //         "a=control:*\r\n"
+        //         "m=video 0 RTP/AVP 96\r\n"
+        //         "a=rtpmap:96 H264/%d\r\n"
+        //         "a=control:track0\r\n",
+        //         time(NULL), local_ip, kRtmpVideoTimeBase);
 
+        // rtsp with audio only
+        sprintf(sdp_buf,
+                "v=0\r\n"
+                "o=- 9%ld 1 IN IP4 %s\r\n"
+                "t=0 0\r\n"
+                "a=control:*\r\n"
+                "m=audio 0 RTP/AVP 97\r\n"
+                "a=rtpmap:97 mpeg4-generic/%d/%d\r\n"
+                "a=fmtp:97 profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1210;\r\n"
+                "a=control:track0\r\n",
+                time(NULL), local_ip, kAudioSampleRate, kAudioChannel);
+    } else {
+        // rtp video and audio stream over tcp
+        sprintf(sdp_buf,
+                "v=0\r\n"
+                "o=- 9%ld 1 IN IP4 %s\r\n"
+                "t=0 0\r\n"
+                "a=control:*\r\n"
+                "m=video 0 RTP/AVP/TCP 96\r\n"
+                "a=rtpmap:96 H264/%d\r\n"
+                "a=control:track0\r\n"
+                "m=audio 1 RTP/AVP/TCP 97\r\n"
+                "a=rtpmap:97 mpeg4-generic/%d/%d\r\n"
+                "a=fmtp:97 profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1210;\r\n"
+                "a=control:track1\r\n",
+                time(NULL), local_ip, kRtmpVideoTimeBase, kAudioSampleRate, kAudioChannel);
+    }
     sprintf(buf,
             "RTSP/1.0 200 OK\r\nCSeq: %d\r\n"
             "Content-Base: %s\r\n"
@@ -235,13 +274,33 @@ void RtspServer::BuildDescribeMessage(char *buf, int CSeq, char *url) {
 }
 
 void RtspServer::BuildSetupMessage(char *buf, int CSeq, int client_rtp_port, int client_rtcp_port) {
-    sprintf(buf,
-            "RTSP/1.0 200 OK\r\n"
-            "CSeq: %d\r\n"
-            "Transport: RTP/AVP;unicast;client_port=%d-%d;server_port=%d-%d\r\n"
-            "Session: 66334873\r\n"
-            "\r\n",
-            CSeq, client_rtp_port, client_rtcp_port, server_rtp_port_, server_rtcp_port_);
+    if (tcp_mode_) {
+        if (CSeq == 3) {
+            sprintf(buf,
+                    "RTSP/1.0 200 OK\r\n"
+                    "CSeq: %d\r\n"
+                    "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n"
+                    "Session: 66334873\r\n"
+                    "\r\n",
+                    CSeq);
+        } else if (CSeq == 4) {
+            sprintf(buf,
+                    "RTSP/1.0 200 OK\r\n"
+                    "CSeq: %d\r\n"
+                    "Transport: RTP/AVP/TCP;unicast;interleaved=2-3\r\n"
+                    "Session: 66334873\r\n"
+                    "\r\n",
+                    CSeq);
+        }
+    } else {
+        sprintf(buf,
+                "RTSP/1.0 200 OK\r\n"
+                "CSeq: %d\r\n"
+                "Transport: RTP/AVP;unicast;client_port=%d-%d;server_port=%d-%d\r\n"
+                "Session: 66334873\r\n"
+                "\r\n",
+                CSeq, client_rtp_port, client_rtcp_port, server_rtp_port_, server_rtcp_port_);
+    }
 }
 
 void RtspServer::BuildPlayMessage(char *buf, int CSeq) {
@@ -276,7 +335,7 @@ void RtspServer::LoopReadAndSendVideoFrame() {
             break;
         }
 
-        SendH264FrameByUdp(rtp_packet, frame_buf, frame_size);
+        SendH264Frame(rtp_packet, frame_buf, frame_size);
         usleep(1000 * 1000 / kFrameRate);
     }
     // release resources
@@ -319,7 +378,7 @@ void RtspServer::LoopReadAndSendAudioFrame() {
             break;
         }
 
-        SendAACFrameByUdp(rtp_packet, frame_buf, ret);
+        SendAACFrame(rtp_packet, frame_buf, ret);
 
         usleep(2000);
     }
@@ -328,7 +387,84 @@ void RtspServer::LoopReadAndSendAudioFrame() {
     fclose(fp);
 }
 
-void RtspServer::SendH264FrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, int frame_size) {
+void RtspServer::LoopReadAndSendAVFrameOverTcp() {
+    std::thread video_thread([&]() {
+        std::unique_ptr<FILE, decltype(fclose) *> video_fp(fopen(kH264TestFile, "rb"), fclose);
+        if (video_fp == nullptr) {
+            LOGE("Cannot open video file %s ", kH264TestFile);
+            return;
+        }
+        const int frame_buf_size = 500000;
+        std::unique_ptr<char, decltype(free) *> frame_buf(reinterpret_cast<char *>(malloc(frame_buf_size)),
+                                                          free);
+
+        std::unique_ptr<RtpPacket, decltype(free) *> rtp_packet(reinterpret_cast<RtpPacket *>(malloc(frame_buf_size)),
+                                                                free);
+        memset(&rtp_packet->header, 0, sizeof(RtpHeader));
+        rtp_packet->header.version = RTP_VERSION;
+        rtp_packet->header.payload_type = RTP_PAYLOAD_TYPE_H264;
+        rtp_packet->header.ssrc = 0x88923423;
+
+        LOGI("Start video paly thread");
+
+        while (true) {
+            int frame_size = H264GetFrameFromFile(video_fp.get(), frame_buf.get(), frame_buf_size);
+            if (frame_size <= 0) {
+                LOGI("Read end of H264 file");
+                break;
+            }
+            SendH264Frame(rtp_packet.get(), frame_buf.get(), frame_size, true);
+            usleep(1000 * 1000 / kFrameRate);
+        }
+    });
+
+    std::thread audio_thread([&]() {
+        std::unique_ptr<FILE, decltype(fclose) *> audio_fp(fopen(kAACTestFile, "rb"), fclose);
+        if (audio_fp == nullptr) {
+            LOGE("Cannot open audio file %s", kAACTestFile);
+        }
+        const int frame_buf_size = 5000;
+
+        std::unique_ptr<char, decltype(free) *> frame_buf(reinterpret_cast<char *>(malloc(frame_buf_size)),
+                                                          free);
+
+        std::unique_ptr<RtpPacket, decltype(free) *> rtp_packet(reinterpret_cast<RtpPacket *>(malloc(frame_buf_size)),
+                                                                free);
+
+        memset(&rtp_packet->header, 0, sizeof(RtpHeader));
+        rtp_packet->header.version = RTP_VERSION;
+        rtp_packet->header.payload_type = RTP_PAYLOAD_TYPE_AAC;
+        rtp_packet->header.ssrc = 0x32411;
+
+        const int kAdtsHeaderSize = 7;
+        AdtsHeader adts_header;
+        while (true) {
+            int frame_size = fread(frame_buf.get(), 1, kAdtsHeaderSize, audio_fp.get());
+            if (frame_size < kAdtsHeaderSize) {
+                LOGI("Read end of aac file");
+                break;
+            }
+
+            if (!ParseAdtsHeader((uint8_t *)frame_buf.get(), kAdtsHeaderSize, &adts_header)) {
+                LOGI("Invalid adts header");
+                break;
+            }
+            int ret = fread(frame_buf.get(), 1, adts_header.aac_frame_length - kAdtsHeaderSize, audio_fp.get());
+            if (ret <= 0) {
+                LOGE("Read end of file without enough data");
+                break;
+            }
+
+            SendAACFrame(rtp_packet.get(), frame_buf.get(), ret, true);
+
+            usleep(2000);
+        }
+    });
+    video_thread.join();
+    audio_thread.join();
+}
+
+void RtspServer::SendH264Frame(RtpPacket *rtp_packet, const char *frame_buf, int frame_size, bool tcp) {
     int start_code_length = 4;
     if (H264ThreeByteStartCode(frame_buf)) {
         start_code_length = 3;
@@ -344,7 +480,7 @@ void RtspServer::SendH264FrameByUdp(RtpPacket *rtp_packet, const char *frame_buf
         //*  |F|NRI|  Type   | a single NAL unit ... |
         //*  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
         memcpy(rtp_packet->payload, frame_buf, frame_size);
-        SendRtpPacket(rtp_packet, frame_size + RTP_HEADER_SIZE);
+        SendRtpPacket(rtp_packet, frame_size + RTP_HEADER_SIZE, tcp);
         rtp_packet->header.seq++;
     } else {
         int pkg_count = ceil(frame_size * 1.0 / RTP_MAX_PKT_SIZE);
@@ -364,7 +500,7 @@ void RtspServer::SendH264FrameByUdp(RtpPacket *rtp_packet, const char *frame_buf
             size = (remain_frame_size >= RTP_MAX_PKT_SIZE ? RTP_MAX_PKT_SIZE : remain_frame_size);
 
             memcpy(rtp_packet->payload + 2, frame_buf + position, size);
-            SendRtpPacket(rtp_packet, size + 2 + RTP_HEADER_SIZE);
+            SendRtpPacket(rtp_packet, size + 2 + RTP_HEADER_SIZE, tcp);
 
             position += size;
             remain_frame_size -= size;
@@ -373,20 +509,20 @@ void RtspServer::SendH264FrameByUdp(RtpPacket *rtp_packet, const char *frame_buf
         assert(remain_frame_size == 0);
     }
     if ((nalu_type & 0x1F) != 0x07 && (nalu_type & 0x1F) != 0x08) {
-        rtp_packet->header.timestamp += kRtmpVideoTimeBase / kFrameRate;      
+        rtp_packet->header.timestamp += kRtmpVideoTimeBase / kFrameRate;
     }
 }
 
-void RtspServer::SendAACFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, const int frame_buf_size) {
-    //https://blog.csdn.net/yangguoyu8023/article/details/106517251/
+void RtspServer::SendAACFrame(RtpPacket *rtp_packet, const char *frame_buf, const int frame_buf_size, bool tcp) {
+    // https://blog.csdn.net/yangguoyu8023/article/details/106517251/
     rtp_packet->payload[0] = 0x00;
     rtp_packet->payload[1] = 0x10;
-    rtp_packet->payload[2] = (frame_buf_size & 0x1FE0) >> 5;  //高8位
-    rtp_packet->payload[3] = (frame_buf_size & 0x1f) << 3; // 低5位
+    rtp_packet->payload[2] = (frame_buf_size & 0x1FE0) >> 5;  // 高8位
+    rtp_packet->payload[3] = (frame_buf_size & 0x1f) << 3;    // 低5位
 
     memcpy(rtp_packet->payload + 4, frame_buf, frame_buf_size);
 
-    if (!SendRtpPacket(rtp_packet, frame_buf_size + 4 + RTP_HEADER_SIZE)) {
+    if (!SendRtpPacket(rtp_packet, frame_buf_size + 4 + RTP_HEADER_SIZE, tcp, 0x02)) {
         LOGE("Send rtp packet failed");
     }
 
@@ -395,13 +531,30 @@ void RtspServer::SendAACFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf,
     rtp_packet->header.timestamp = 1025;
 }
 
-bool RtspServer::SendRtpPacket(RtpPacket *rtp_packet, int rtp_packet_size) {
+bool RtspServer::SendRtpPacket(RtpPacket *rtp_packet, int rtp_packet_size, bool tcp, int channel) {
     rtp_packet->header.seq = htons(rtp_packet->header.seq);
     rtp_packet->header.timestamp = htonl(rtp_packet->header.timestamp);
     rtp_packet->header.ssrc = htonl(rtp_packet->header.ssrc);
 
-    bool ret = SendDataByUdp(server_rtp_socket_, client_ip_.c_str(), client_rtp_port_, (const char *)rtp_packet,
-                             rtp_packet_size);
+    std::lock_guard<std::mutex> lock_gard(send_mutex);
+    bool ret = true;
+    if (!tcp) {
+        ret = SendDataByUdp(server_rtp_socket_, client_ip_.c_str(), client_rtp_port_, (const char *)rtp_packet,
+                            rtp_packet_size);
+    } else {
+        char *temp_buf = (char *)malloc(4 + rtp_packet_size);
+        temp_buf[0] = 0x24;
+        temp_buf[1] = channel;
+        temp_buf[2] = (uint8_t)(((rtp_packet_size)&0xFF00) >> 8);
+        temp_buf[3] = (uint8_t)((rtp_packet_size)&0xFF);
+        memcpy(temp_buf + 4, rtp_packet, rtp_packet_size);
+
+        int send_ret = send(client_rtsp_socket_, temp_buf, 4 + rtp_packet_size, 0);
+        if (send_ret < 0) {
+            ret = false;
+        }
+        free(temp_buf);
+    }
     rtp_packet->header.seq = ntohs(rtp_packet->header.seq);
     rtp_packet->header.timestamp = ntohl(rtp_packet->header.timestamp);
     rtp_packet->header.ssrc = ntohl(rtp_packet->header.ssrc);

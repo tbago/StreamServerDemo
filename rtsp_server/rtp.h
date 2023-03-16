@@ -28,7 +28,7 @@
  */
 struct RtpHeader {
     /* byte 0 */
-    uint8_t csrcLen : 4;    // CSRC计数器，占4位，指示CSRC 标识符的个数。
+    uint8_t csrc_len : 4;    // CSRC计数器，占4位，指示CSRC 标识符的个数。
     uint8_t extension : 1;  // 占1位，如果X=1，则在RTP报头后跟有一个扩展报头。
     uint8_t padding : 1;    // 填充标志，占1位，如果P=1，则在该报文的尾部填充一个或多个额外的八位组，它们不是有效载荷的一部分。
     uint8_t version : 2;    // RTP协议的版本号，占2位，当前协议版本号为2。

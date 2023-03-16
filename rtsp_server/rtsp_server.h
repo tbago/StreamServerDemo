@@ -26,17 +26,20 @@ private:
 private:
     void LoopReadAndSendVideoFrame();
     void LoopReadAndSendAudioFrame();
-    void SendH264FrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, const int frame_size);
-    void SendAACFrameByUdp(RtpPacket *rtp_packet, const char *frame_buf, const int frame_size);
-    bool SendRtpPacket(RtpPacket *rtp_packet, int rtp_packet_length);
+    void LoopReadAndSendAVFrameOverTcp();
+    void SendH264Frame(RtpPacket *rtp_packet, const char *frame_buf, const int frame_size, bool tcp = false);
+    void SendAACFrame(RtpPacket *rtp_packet, const char *frame_buf, const int frame_size, bool tcp = false);
+    bool SendRtpPacket(RtpPacket *rtp_packet, int rtp_packet_length, bool tcp = false, int channel = 0);
 
 private:
+    bool tcp_mode_;
     int server_port_;
     int server_rtp_port_;
     int server_rtcp_port_;
     int server_socket_;
     int server_rtp_socket_;
     std::string client_ip_;
+    int client_rtsp_socket_;
     int client_rtp_port_;
     int client_rtcp_port_;
 };
